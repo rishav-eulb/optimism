@@ -1,47 +1,62 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.15;
 
-import { CrossDomainMessenger } from "src/universal/CrossDomainMessenger.sol";
+import { CrossDomainMessenger } from "./CrossDomainMessenger.sol";
 import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import { IOptimismMintableERC20 } from "src/universal/IOptimismMintableERC20.sol";
 
-contract L2StandardBridge {
+contract L1StandardBridge {
     CrossDomainMessenger public immutable crossDomainMessenger;
+    mapping(address => mapping(address => uint256)) private deposits;
 
-    event RewardMinted(address indexed recipient, uint256 amount);
+    event TokensLocked(
+        address indexed sender,
+        address indexed token,
+        uint256 amount,
+        uint32 chainId
+    );
 
     constructor(address _crossDomainMessenger) {
         crossDomainMessenger = CrossDomainMessenger(_crossDomainMessenger);
     }
 
-    function finalizeBridgeERC20(
+    function bridgeERC20To(
         address _localToken,
+        address _remoteToken,
         address _to,
         uint256 _amount,
+        uint32 _minGasLimit,
         bytes calldata _extraData
     ) external {
-        // Ensure that the message is coming from the L1 bridge
-        require(msg.sender == address(crossDomainMessenger), "Invalid sender");
+        ERC20 localToken = ERC20(_localToken);
+        uint256 allowance = localToken.allowance(msg.sender, address(this));
+        require(allowance >= _amount, "Insufficient allowance");
+        localToken.transferFrom(msg.sender, address(this), _amount);
 
-        // Mint tokens on the L2 side
-        IOptimismMintableERC20(_localToken).mint(_to, _amount);
+        deposits[_localToken][_remoteToken] += _amount;
 
-        emit RewardMinted(_to, _amount);
-
-        // Execute any additional logic specified by the user
-        // (e.g., update user balances or emit custom events)
-        // The _extraData parameter can be used for this purpose.
-        // ...
-
-        // Note: The gas limit is automatically determined by the crossDomainMessenger
-
-        // You may want to implement additional security checks and validations here.
-
-        // Optionally, you can emit an event to log the completion of the minting process
-        // ...
+        emit TokensLocked(msg.sender, _localToken, _amount, _remoteToken);
+        crossDomainMessenger.sendMessage(
+            _remoteToken,
+            abi.encodeWithSignature(
+                "finalizeBridgeERC20(address,address,address,uint256,bytes)",
+                _localToken,
+                _to,
+                _amount,
+                _extraData
+            ),
+            _minGasLimit
+        );
     }
 
-    function getUserBalance(address _token, address _user) external view returns (uint256) {
-        return ERC20(_token).balanceOf(_user);
+    function getDeposit(address _localToken, address _remoteToken) external view returns (uint256) {
+        return deposits[_localToken][_remoteToken];
+    }
+
+    function withdraw(address _token, address _to, uint256 _amount) external {
+        ERC20 token = ERC20(_token);
+        require(deposits[_token][_token] >= _amount, "Insufficient balance");
+
+        deposits[_token][_token] -= _amount;
+        token.transfer(_to, _amount);
     }
 }
